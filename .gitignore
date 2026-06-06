@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Go binaries for programs and plugins
+/gow
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build/test artifacts
+*.test
+*.out
+/coverage.out
+/coverage.html
+
+# Go dependency/workspace state
+vendor/
+go.work
+go.work.sum
+
+# Local state/secrets
+.env
