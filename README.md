@@ -20,6 +20,8 @@ import "github.com/ragokan/gow"
 func main() {
 	value := gow.Must(loadValue())
 	gow.MustNoError(start(value))
+	take := gow.Ptr[int32](10)
+	_ = take
 }
 ```
 
