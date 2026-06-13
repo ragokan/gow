@@ -2,14 +2,15 @@
 # Orchestrates the full benchmark for both apps under identical conditions.
 #
 # Methodology:
-#   * Both apps are pinned to the same CPU cores (APP_CORES) and given the
-#     same DB connection pool; bombardier (the load generator) is pinned to a
-#     separate set of cores (LOAD_CORES) so it does not steal the app's CPU.
-#   * Apps are benchmarked sequentially (never at the same time) so neither
-#     competes with the other for Postgres or memory.
+#   * Both apps are pinned to the same CPU cores (APP_CORES) and given the same
+#     DB connection pool; bombardier (the load generator) is pinned to separate
+#     cores (LOAD_CORES) so it never steals the app's CPU.
+#   * Apps are benchmarked sequentially (never at the same time).
 #   * The DB is reset to an identical seed before each app's run.
-#   * For every app we record idle CPU/RSS (server up, no traffic) and, for
-#     each scenario, under-load CPU/RSS sampled in parallel with bombardier.
+#   * A single continuous sampler records app + system CPU and app memory once
+#     per second for the entire lifetime of each server (idle, warmup, every
+#     scenario, and the gaps), tagged with the current phase. Per-scenario
+#     start/end timestamps are recorded so stats can be sliced exactly.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,13 +18,13 @@ BIN="$ROOT/bin"
 SCRIPTS="$ROOT/scripts"
 RESULTS="$ROOT/results/raw"
 
-DURATION="${DURATION:-60}"      # seconds per scenario
+DURATION="${DURATION:-120}"     # seconds per scenario
 CONNS="${CONNS:-256}"           # concurrent connections (parallelism)
 SEED_ROWS="${SEED_ROWS:-10000}"
 APP_CORES="${APP_CORES:-0,1}"
 LOAD_CORES="${LOAD_CORES:-2,3}"
-IDLE_SECS="${IDLE_SECS:-15}"
-WARMUP_SECS="${WARMUP_SECS:-8}"
+IDLE_SECS="${IDLE_SECS:-20}"
+WARMUP_SECS="${WARMUP_SECS:-10}"
 
 export PATH="$PATH:/root/go/bin:/usr/share/dotnet"
 export DATABASE_URL_GO="postgres://bench:benchpass@127.0.0.1:5432/benchdb?sslmode=disable"
@@ -52,9 +53,13 @@ wait_health() {
 }
 
 run_app() {
-  local app="$1" port base pid outdir
+  local app="$1" port base pid outdir phase_file sampler
   outdir="$RESULTS/$app"
   mkdir -p "$outdir"
+  phase_file="$outdir/current_phase"
+  echo "boot" > "$phase_file"
+  : > "$outdir/phases.csv"
+  echo "phase,start_epoch,end_epoch" > "$outdir/phases.csv"
 
   echo "==================== $app ===================="
   bash "$SCRIPTS/seed.sh" "$SEED_ROWS"
@@ -66,43 +71,52 @@ run_app() {
     pid=$!
   else
     port=8081
-    DOTNET_gcServer=1 DATABASE_URL="$DATABASE_URL_NET" PORT="$port" \
+    DATABASE_URL="$DATABASE_URL_NET" PORT="$port" \
       taskset -c "$APP_CORES" "$BIN/dotnet-api/DotnetApi" >"$outdir/server.log" 2>&1 &
     pid=$!
   fi
   base="http://127.0.0.1:$port"
   echo "$app started pid=$pid on cores $APP_CORES, port $port"
 
+  # Start the continuous, whole-run resource recorder.
+  bash "$SCRIPTS/sample_continuous.sh" "$pid" "$phase_file" "$outdir/resources.csv" &
+  sampler=$!
+
   if ! wait_health "$base"; then
-    cat "$outdir/server.log"; kill "$pid" 2>/dev/null || true; return 1
+    cat "$outdir/server.log"; kill "$pid" "$sampler" 2>/dev/null || true; return 1
   fi
 
-  # Warmup (JIT for .NET, pool fill, page cache) - not recorded.
+  # Warmup (pool fill, page cache; AOT/native has no JIT warmup) - not recorded.
+  echo "warmup" > "$phase_file"
   taskset -c "$LOAD_CORES" bombardier -c "$CONNS" -d "${WARMUP_SECS}s" "$base/users?limit=20" >/dev/null 2>&1 || true
 
-  # Idle resource usage: server up, no traffic.
-  echo "  sampling idle resources for ${IDLE_SECS}s..."
-  bash "$SCRIPTS/sample_resources.sh" "$pid" "$IDLE_SECS" "$outdir/idle.resources.json"
-  cat "$outdir/idle.resources.json"; echo
+  # Idle window: server up, no traffic.
+  echo "idle" > "$phase_file"
+  echo "  idle window ${IDLE_SECS}s..."
+  local s=$(date +%s); sleep "$IDLE_SECS"; local e=$(date +%s)
+  echo "idle,$s,$e" >> "$outdir/phases.csv"
 
   for entry in "${SCENARIOS[@]}"; do
     IFS='|' read -r name method path <<< "$entry"
     echo "  scenario: $name ($method $path)"
-    bash "$SCRIPTS/sample_resources.sh" "$pid" "$DURATION" "$outdir/${name}.resources.json" &
-    local sampler=$!
-
+    echo "$name" > "$phase_file"
     local args=(-c "$CONNS" -d "${DURATION}s" -l --format json -m "$method")
     if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
       args+=(-H 'Content-Type: application/json' -b "$BODY")
     fi
-    taskset -c "$LOAD_CORES" bombardier "${args[@]}" "$base$path" >"$outdir/${name}.bombardier.json" 2>"$outdir/${name}.bombardier.err" || \
+    s=$(date +%s)
+    taskset -c "$LOAD_CORES" bombardier "${args[@]}" "$base$path" \
+      >"$outdir/${name}.bombardier.json" 2>"$outdir/${name}.bombardier.err" || \
       echo "    bombardier returned non-zero (see ${name}.bombardier.err)"
-    wait "$sampler"
-    cat "$outdir/${name}.resources.json"; echo
+    e=$(date +%s)
+    echo "${name},$s,$e" >> "$outdir/phases.csv"
+    echo "idle_between" > "$phase_file"; sleep 2
   done
 
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  wait "$sampler" 2>/dev/null || true
+  rm -f "$phase_file"
   echo "$app stopped"
 }
 

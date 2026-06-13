@@ -6,7 +6,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW = os.path.join(ROOT, "results", "raw")
-APPS = [("go", "Go (chi+pgx+sqlc)"), ("dotnet", ".NET (Minimal API+Npgsql+Dapper)")]
+APPS = [("go", "Go (chi+pgx+sqlc, native)"),
+        ("dotnet", ".NET (Minimal API+Npgsql, Native AOT)")]
 SCENARIOS = [
     ("health", "GET /health (no DB)"),
     ("read_one", "GET /users/{id}"),
@@ -25,9 +26,50 @@ def load_bombardier(app, name):
     return json.loads(s[s.index("{"):])["result"]
 
 
+_RES_CACHE = {}
+
+
+def _windows(app):
+    out = {}
+    with open(os.path.join(RAW, app, "phases.csv")) as f:
+        next(f)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            phase, s, e = line.split(",")
+            out[phase] = (int(s), int(e))
+    return out
+
+
 def load_res(app, name):
-    with open(os.path.join(RAW, app, f"{name}.resources.json")) as f:
-        return json.load(f)
+    """avg/max app CPU%, app RSS MiB, and system CPU% over the named phase,
+    sliced out of the continuous resources.csv by timestamp."""
+    key = (app, name)
+    if key in _RES_CACHE:
+        return _RES_CACHE[key]
+    s, e = _windows(app)[name]
+    cpu, rss, sys = [], [], []
+    with open(os.path.join(RAW, app, "resources.csv")) as f:
+        next(f)
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) < 6:
+                continue
+            epoch = int(parts[0])
+            if s <= epoch <= e:
+                cpu.append(float(parts[3]))
+                rss.append(float(parts[4]))
+                sys.append(float(parts[5]))
+    avg = lambda xs: round(sum(xs) / len(xs), 2) if xs else 0.0
+    res = {
+        "samples": len(cpu),
+        "cpu_pct_avg": avg(cpu), "cpu_pct_max": round(max(cpu), 2) if cpu else 0.0,
+        "rss_mib_avg": avg(rss), "rss_mib_max": round(max(rss), 2) if rss else 0.0,
+        "sys_cpu_avg": avg(sys), "sys_cpu_max": round(max(sys), 2) if sys else 0.0,
+    }
+    _RES_CACHE[key] = res
+    return res
 
 
 def fmt(n, d=1):
@@ -50,12 +92,13 @@ def main():
     out.append("|---|---|")
     out.append("| Host | 4 vCPU, ~15 GiB RAM, Linux 6.18 |")
     out.append("| Database | PostgreSQL 16.13 (shared, local TCP) |")
-    out.append("| Go service | Go 1.25, chi v5.3.0, pgx v5.10.0, sqlc v1.31.1 |")
-    out.append("| .NET service | .NET 10.0.301, Npgsql 9.0.3, Dapper 2.1.66 |")
+    out.append("| Go service | Go 1.25 native, chi v5.3.0, pgx v5.10.0 (prepared-stmt cache), sqlc v1.31.1 |")
+    out.append("| .NET service | .NET 10.0.301 **Native AOT**, Server GC, Npgsql 9.0.3 raw + auto-prepare |")
     out.append("| CPU budget | both apps pinned to cores 0,1 (2 cores); bombardier on cores 2,3 |")
     out.append("| Pool | 10 min / 50 max connections (both) |")
-    out.append("| Load | 256 connections, 60 s per scenario, sequential runs |")
+    out.append("| Load | 256 connections, 120 s per scenario, sequential runs |")
     out.append("| Seed | 10,000 rows, reset before each app |")
+    out.append("| Recording | continuous 1 s samples of app+system CPU and app RSS for the whole run |")
     out.append("")
 
     # Auto headline: geometric mean of throughput across DB-backed scenarios
@@ -108,17 +151,22 @@ def main():
                    f"{nr['latency']['mean']/1000:.3f} | {npc:.3f} |")
     out.append("")
 
-    # Resource-under-load table
+    # Resource-under-load table (CPU% is relative to one core; max 200% here).
     out.append("### Resource usage under load (per scenario)\n")
-    out.append("| Scenario | Go CPU% avg/max | Go RSS MiB avg/max | .NET CPU% avg/max | .NET RSS MiB avg/max |")
-    out.append("|---|---|---|---|---|")
+    out.append("App CPU% is relative to a single core (200% = both pinned cores "
+               "saturated). System CPU% is whole-machine (all 4 cores incl. "
+               "Postgres + bombardier). Full 1 s time-series in "
+               "`results/raw/<app>/resources.csv`.\n")
+    out.append("| Scenario | Go app CPU% avg/max | Go RSS MiB avg/max | Go sys% avg "
+               "| .NET app CPU% avg/max | .NET RSS MiB avg/max | .NET sys% avg |")
+    out.append("|---|---|---|---:|---|---|---:|")
     for name, label in SCENARIOS:
         g = load_res("go", name)
         n = load_res("dotnet", name)
         out.append(f"| {label} | {g['cpu_pct_avg']}/{g['cpu_pct_max']} | "
-                   f"{g['rss_mib_avg']}/{g['rss_mib_max']} | "
+                   f"{g['rss_mib_avg']}/{g['rss_mib_max']} | {g['sys_cpu_avg']} | "
                    f"{n['cpu_pct_avg']}/{n['cpu_pct_max']} | "
-                   f"{n['rss_mib_avg']}/{n['rss_mib_max']} |")
+                   f"{n['rss_mib_avg']}/{n['rss_mib_max']} | {n['sys_cpu_avg']} |")
     out.append("")
 
     # Error check

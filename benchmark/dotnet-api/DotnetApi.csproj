@@ -5,10 +5,19 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Native AOT: no JIT, ahead-of-time compiled to a native binary. -->
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
+
+    <!-- Throughput-oriented GC (matches a production high-load service). -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Dapper" Version="2.1.66" />
+    <!-- Raw Npgsql only: Dapper's runtime IL-emit mapping is not AOT-safe,
+         and hand-mapped readers are the fastest, fully trim/AOT-safe path. -->
     <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 
