@@ -8,57 +8,60 @@
 |---|---|
 | Host | 4 vCPU, ~15 GiB RAM, Linux 6.18 |
 | Database | PostgreSQL 16.13 (shared, local TCP) |
-| Go service | Go 1.25, chi v5.3.0, pgx v5.10.0, sqlc v1.31.1 |
-| .NET service | .NET 10.0.301, Npgsql 9.0.3, Dapper 2.1.66 |
+| Go service | Go 1.25 native, chi v5.3.0, pgx v5.10.0 (prepared-stmt cache), sqlc v1.31.1 |
+| .NET service | .NET 10.0.301 **Native AOT**, Server GC, Npgsql 9.0.3 raw + auto-prepare |
 | CPU budget | both apps pinned to cores 0,1 (2 cores); bombardier on cores 2,3 |
 | Pool | 10 min / 50 max connections (both) |
-| Load | 256 connections, 60 s per scenario, sequential runs |
+| Load | 256 connections, 120 s per scenario, sequential runs |
 | Seed | 10,000 rows, reset before each app |
+| Recording | continuous 1 s samples of app+system CPU and app RSS for the whole run |
 
-**Headline (geomean of DB-backed CRUD throughput, excl. the lock-bound update):** Go 8,184 rps vs .NET 7,454 rps — **Go** leads by 1.10x. Idle memory: Go ~34 MiB vs .NET ~162 MiB.
+**Headline (geomean of DB-backed CRUD throughput, excl. the lock-bound update):** Go 12,895 rps vs .NET 11,975 rps — **Go** leads by 1.08x. Idle memory: Go ~36 MiB vs .NET ~117 MiB.
 
 ### Idle resource usage (server running, zero traffic)
 
 | App | CPU % (avg / max) | RSS MiB (avg / max) |
 |---|---|---|
-| Go (chi+pgx+sqlc) | 0.0 / 0.0 | 33.6 / 34.55 |
-| .NET (Minimal API+Npgsql+Dapper) | 3.33 / 49.0 | 162.11 / 162.16 |
+| Go (chi+pgx+sqlc, native) | 2.3 / 39.0 | 35.81 / 35.95 |
+| .NET (Minimal API+Npgsql, Native AOT) | 3.7 / 74.0 | 116.73 / 116.81 |
 
 ### Throughput (requests/sec, higher is better)
 
 | Scenario | Go RPS | .NET RPS | Winner | Δ |
 |---|---:|---:|---|---:|
-| GET /health (no DB) | 58,560.6 | 78,053.0 | **.NET** | 1.33x |
-| GET /users/{id} | 15,431.1 | 10,377.2 | **Go** | 1.49x |
-| GET /users?limit=20 | 7,122.2 | 8,192.6 | **.NET** | 1.15x |
-| GET /users?limit=100 | 3,580.4 | 5,039.7 | **.NET** | 1.41x |
-| PUT /users/{id} | 960.5 | 986.9 | **.NET** | 1.03x |
-| POST /users | 11,398.5 | 7,206.9 | **Go** | 1.58x |
-| DELETE /users/{id} | 17,689.2 | 12,705.2 | **Go** | 1.39x |
+| GET /health (no DB) | 98,623.3 | 123,980.3 | **.NET** | 1.26x |
+| GET /users/{id} | 28,568.4 | 20,956.6 | **Go** | 1.36x |
+| GET /users?limit=20 | 13,417.1 | 14,063.4 | **.NET** | 1.05x |
+| GET /users?limit=100 | 5,353.3 | 6,824.1 | **.NET** | 1.27x |
+| PUT /users/{id} | 880.3 | 588.3 | **Go** | 1.50x |
+| POST /users | 13,475.9 | 10,224.3 | **Go** | 1.32x |
+| DELETE /users/{id} | 33,038.3 | 17,979.6 | **Go** | 1.84x |
 
 ### Latency (ms, lower is better)
 
 | Scenario | Go avg | Go p99 | .NET avg | .NET p99 |
 |---|---:|---:|---:|---:|
-| GET /health (no DB) | 4.371 | 16.023 | 3.280 | 9.097 |
-| GET /users/{id} | 16.595 | 41.279 | 24.805 | 36.461 |
-| GET /users?limit=20 | 35.942 | 69.795 | 31.556 | 44.785 |
-| GET /users?limit=100 | 71.607 | 135.143 | 51.204 | 69.819 |
-| PUT /users/{id} | 266.145 | 463.389 | 258.862 | 471.759 |
-| POST /users | 22.467 | 49.702 | 35.597 | 58.490 |
-| DELETE /users/{id} | 14.478 | 36.829 | 20.335 | 33.457 |
+| GET /health (no DB) | 2.594 | 10.086 | 2.064 | 5.147 |
+| GET /users/{id} | 8.960 | 22.467 | 12.236 | 18.918 |
+| GET /users?limit=20 | 19.081 | 38.141 | 18.268 | 34.768 |
+| GET /users?limit=100 | 47.814 | 88.316 | 37.644 | 59.645 |
+| PUT /users/{id} | 290.484 | 508.148 | 434.527 | 777.836 |
+| POST /users | 18.997 | 41.746 | 25.053 | 48.932 |
+| DELETE /users/{id} | 7.751 | 20.025 | 14.287 | 25.872 |
 
 ### Resource usage under load (per scenario)
 
-| Scenario | Go CPU% avg/max | Go RSS MiB avg/max | .NET CPU% avg/max | .NET RSS MiB avg/max |
-|---|---|---|---|---|
-| GET /health (no DB) | 177.97/196.0 | 32.3/32.82 | 190.67/203.0 | 120.77/165.96 |
-| GET /users/{id} | 132.95/138.0 | 36.23/36.54 | 133.17/148.0 | 131.04/144.65 |
-| GET /users?limit=20 | 140.67/151.0 | 37.77/38.54 | 131.2/147.0 | 132.87/167.84 |
-| GET /users?limit=100 | 158.1/167.0 | 42.16/43.95 | 142.72/157.0 | 139.02/164.81 |
-| PUT /users/{id} | 30.05/35.0 | 38.26/41.19 | 53.43/87.0 | 161.75/166.71 |
-| POST /users | 116.43/132.0 | 38.47/38.97 | 109.53/124.0 | 148.16/181.61 |
-| DELETE /users/{id} | 131.15/160.0 | 37.92/38.52 | 123.58/135.0 | 140.94/163.82 |
+App CPU% is relative to a single core (200% = both pinned cores saturated). System CPU% is whole-machine (all 4 cores incl. Postgres + bombardier). Full 1 s time-series in `results/raw/<app>/resources.csv`.
+
+| Scenario | Go app CPU% avg/max | Go RSS MiB avg/max | Go sys% avg | .NET app CPU% avg/max | .NET RSS MiB avg/max | .NET sys% avg |
+|---|---|---|---:|---|---|---:|
+| GET /health (no DB) | 178.86/189.0 | 32.22/32.6 | 76.14 | 193.86/201.0 | 50.77/120.57 | 88.87 |
+| GET /users/{id} | 137.36/141.0 | 36.19/37.0 | 72.7 | 148.1/156.0 | 65.25/80.38 | 89.45 |
+| GET /users?limit=20 | 141.11/147.0 | 38.56/40.21 | 68.01 | 141.14/149.0 | 70.21/104.26 | 87.74 |
+| GET /users?limit=100 | 162.37/166.0 | 42.43/45.5 | 62.4 | 152.15/163.0 | 78.83/100.51 | 81.18 |
+| PUT /users/{id} | 20.56/23.0 | 38.63/38.81 | 42.19 | 31.58/38.0 | 94.9/97.29 | 41.39 |
+| POST /users | 96.47/112.0 | 38.23/39.11 | 64.46 | 105.64/116.0 | 79.42/105.25 | 75.5 |
+| DELETE /users/{id} | 133.85/165.0 | 37.57/38.0 | 74.01 | 137.61/147.0 | 71.32/96.97 | 85.62 |
 
 ### Error counts (non-2xx responses)
 

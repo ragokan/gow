@@ -1,57 +1,26 @@
 ==================== go ====================
 seeded 10000 rows
-go started pid=26347 on cores 0,1, port 8080
-  sampling idle resources for 15s...
-{"samples": 15, "cpu_pct_avg": 0.00, "cpu_pct_max": 0.00, "rss_mib_avg": 33.60, "rss_mib_max": 34.55}
-
+go started pid=7379 on cores 0,1, port 8080
+  idle window 20s...
   scenario: health (GET /health)
-{"samples": 60, "cpu_pct_avg": 177.97, "cpu_pct_max": 196.00, "rss_mib_avg": 32.30, "rss_mib_max": 32.82}
-
   scenario: read_one (GET /users/1)
-{"samples": 60, "cpu_pct_avg": 132.95, "cpu_pct_max": 138.00, "rss_mib_avg": 36.23, "rss_mib_max": 36.54}
-
   scenario: list_20 (GET /users?limit=20)
-{"samples": 60, "cpu_pct_avg": 140.67, "cpu_pct_max": 151.00, "rss_mib_avg": 37.77, "rss_mib_max": 38.54}
-
   scenario: list_100 (GET /users?limit=100)
-{"samples": 60, "cpu_pct_avg": 158.10, "cpu_pct_max": 167.00, "rss_mib_avg": 42.16, "rss_mib_max": 43.95}
-
   scenario: update (PUT /users/1)
-{"samples": 60, "cpu_pct_avg": 30.05, "cpu_pct_max": 35.00, "rss_mib_avg": 38.26, "rss_mib_max": 41.19}
-
   scenario: create (POST /users)
-{"samples": 60, "cpu_pct_avg": 116.43, "cpu_pct_max": 132.00, "rss_mib_avg": 38.47, "rss_mib_max": 38.97}
-
   scenario: delete (DELETE /users/1)
-{"samples": 60, "cpu_pct_avg": 131.15, "cpu_pct_max": 160.00, "rss_mib_avg": 37.92, "rss_mib_max": 38.52}
-
 go stopped
 ==================== dotnet ====================
 seeded 10000 rows
-dotnet started pid=428 on cores 0,1, port 8081
-  sampling idle resources for 15s...
-{"samples": 15, "cpu_pct_avg": 3.33, "cpu_pct_max": 49.00, "rss_mib_avg": 162.11, "rss_mib_max": 162.16}
-
+dotnet started pid=20358 on cores 0,1, port 8081
+  idle window 20s...
   scenario: health (GET /health)
-{"samples": 60, "cpu_pct_avg": 190.67, "cpu_pct_max": 203.00, "rss_mib_avg": 120.77, "rss_mib_max": 165.96}
-
   scenario: read_one (GET /users/1)
-{"samples": 60, "cpu_pct_avg": 133.17, "cpu_pct_max": 148.00, "rss_mib_avg": 131.04, "rss_mib_max": 144.65}
-
   scenario: list_20 (GET /users?limit=20)
-{"samples": 60, "cpu_pct_avg": 131.20, "cpu_pct_max": 147.00, "rss_mib_avg": 132.87, "rss_mib_max": 167.84}
-
   scenario: list_100 (GET /users?limit=100)
-{"samples": 60, "cpu_pct_avg": 142.72, "cpu_pct_max": 157.00, "rss_mib_avg": 139.02, "rss_mib_max": 164.81}
-
   scenario: update (PUT /users/1)
-{"samples": 60, "cpu_pct_avg": 53.43, "cpu_pct_max": 87.00, "rss_mib_avg": 161.75, "rss_mib_max": 166.71}
-
   scenario: create (POST /users)
-{"samples": 60, "cpu_pct_avg": 109.53, "cpu_pct_max": 124.00, "rss_mib_avg": 148.16, "rss_mib_max": 181.61}
-
   scenario: delete (DELETE /users/1)
-{"samples": 60, "cpu_pct_avg": 123.58, "cpu_pct_max": 135.00, "rss_mib_avg": 140.94, "rss_mib_max": 163.82}
-
 dotnet stopped
 ALL DONE
+EXIT=0

@@ -61,6 +61,10 @@ def load_res(app, name):
                 cpu.append(float(parts[3]))
                 rss.append(float(parts[4]))
                 sys.append(float(parts[5]))
+    # Drop the first in-window sample: its 1 s interval straddles the previous
+    # phase (warmup/ramp), so it would skew the average. Applied to both apps.
+    if len(cpu) > 2:
+        cpu, rss, sys = cpu[1:], rss[1:], sys[1:]
     avg = lambda xs: round(sum(xs) / len(xs), 2) if xs else 0.0
     res = {
         "samples": len(cpu),
