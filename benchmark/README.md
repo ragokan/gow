@@ -8,26 +8,44 @@ memory limits** against a **shared Postgres** instance.
 
 | Concern      | Go app (`go-app/`)                  | .NET app (`dotnet-app/`)                 |
 |--------------|-------------------------------------|------------------------------------------|
-| Language/RT  | Go 1.26                             | .NET 10 (ASP.NET Core 10)                |
-| HTTP router  | [chi](https://github.com/go-chi/chi) v5 | Minimal APIs                         |
-| DB driver    | [pgx](https://github.com/jackc/pgx) v5 (pool) | [Npgsql](https://www.npgsql.org) 10 |
-| Data access  | [sqlc](https://sqlc.dev) (typed, raw SQL) | [EF Core](https://learn.microsoft.com/ef/core) 10 (ORM) |
-| Migrations   | [goose](https://github.com/pressly/goose) v3 | EF Core migrations               |
+| Language/RT  | Go 1.26 (compiled)                  | .NET 10, **Native AOT** (ASP.NET Core)   |
+| HTTP router  | [chi](https://github.com/go-chi/chi) v5 | Minimal APIs (`CreateSlimBuilder`)   |
+| DB driver    | [pgx](https://github.com/jackc/pgx) v5 (pool) | [Npgsql](https://www.npgsql.org) 10 (`NpgsqlDataSource`, auto-prepare) |
+| Data access  | [sqlc](https://sqlc.dev) (typed, raw SQL) | raw typed `Npgsql` commands          |
+| Migrations   | [goose](https://github.com/pressly/goose) v3 | SQL migration runner (goose analog) |
+| JSON         | encoding/json                       | System.Text.Json **source-generated**    |
+| GC/runtime   | cgroup-aware GOMAXPROCS (Go 1.25+)  | Server GC, no JIT (AOT)                   |
 | Database     | PostgreSQL 17                       | PostgreSQL 17                            |
-| JSON         | encoding/json                       | System.Text.Json                         |
 
 All versions are the latest stable available at the time of writing.
 
+### Optimizations applied
+
+**.NET (best-practice high-performance path):**
+
+- **Native AOT** (`<PublishAot>`) — compiles to a self-contained native binary,
+  no JIT, trimmed runtime. Runs on the minimal `runtime-deps` base image.
+- **Source-generated JSON** (`JsonSerializerContext`) — required for AOT and
+  faster than reflection-based serialization.
+- **Slim host** (`WebApplication.CreateSlimBuilder`) — minimal middleware/config.
+- **Raw `Npgsql`** via `NpgsqlDataSource` with `MaxAutoPrepare` (server-side
+  prepared-statement caching) — no ORM overhead.
+- Server GC, `InvariantGlobalization`, `OptimizationPreference=Speed`.
+
+**Go** is already a compiled binary with a cgroup-aware runtime (Go 1.25+
+auto-sizes `GOMAXPROCS` to the CPU limit), pooled `pgx`, and prepared-statement
+caching — so it serves as the lean baseline and is kept idiomatic.
+
 ### A note on fairness
 
-The HTTP, driver, and migration layers are directly comparable. The **data
-access layer differs by design**: `sqlc` generates typed Go from hand-written
-SQL (effectively raw queries over `pgx`), while EF Core is a full ORM with
-change tracking, LINQ translation, and a materialization pipeline. This is the
-realistic, idiomatic choice on each side rather than an artificially matched
-micro-benchmark — reads use `AsNoTracking()` and the schemas/queries are
-equivalent, but the ORM overhead is part of what's being measured. If you want
-an apples-to-apples data layer, swap EF Core for Dapper on the .NET side.
+Both apps now use a **raw, typed-SQL** data layer (`sqlc`+`pgx` vs hand-written
+`Npgsql` commands), so this is a close apples-to-apples comparison rather than
+ORM-vs-sqlc. Schemas, queries, JSON contract (verified byte-identical), and
+connection-pool sizes (10/30) all match.
+
+> An earlier revision used EF Core (a full ORM) on the .NET side; those results
+> live in git history. EF Core's query pipeline is not Native-AOT compatible,
+> which is why the optimized build moved to raw Npgsql.
 
 Both services:
 
@@ -67,7 +85,7 @@ confirms the application (not the generator or DB) is the bottleneck.
 
 ## Benchmark scenarios
 
-Each runs for `DURATION` (default 60s) at `CONNECTIONS` concurrency (default
+Each runs for `DURATION` (default 120s) at `CONNECTIONS` concurrency (default
 256), preceded by a short un-measured warmup. Mutating scenarios reseed the
 dataset first so both apps start from an identical state.
 
@@ -78,8 +96,12 @@ dataset first so both apps start from an identical state.
 5. `POST /users` — insert
 
 For each scenario the harness records throughput (req/s), latency
-(mean/p99/max), status-code counts, and the container's CPU% / memory **under
-load** — plus a separate **idle** measurement per app.
+(mean/p99/max) and status-code counts (via bombardier), plus a **continuous
+time series** of CPU% and memory for **both the app and the Postgres
+container** — sampled every `INTERVAL` seconds (default 0.5s) straight from the
+Docker Engine API by `bench/sampler.py`. A separate **idle** measurement is
+recorded per app. The full per-sample series is kept as CSV in
+`bench/results/` alongside the report.
 
 ## Running it
 
@@ -104,17 +126,19 @@ docker compose down -v
 ```
 
 Tunables (env vars): `DURATION`, `CONNECTIONS`, `TIMEOUT`, `SEED_ROWS`,
-`WARMUP`, `APP_CPUS`, `APP_MEM`, `DB_CPUS`, `DB_MEM`.
+`WARMUP`, `INTERVAL`, `IDLE_SECS`, `APP_CPUS`, `APP_MEM`, `DB_CPUS`, `DB_MEM`.
 
 ## Results
 
-The generated report lands in [`bench/results/REPORT.md`](bench/results/REPORT.md),
-with raw bombardier JSON and per-scenario `docker stats` CSVs alongside it.
+The generated report lands in [`bench/results/REPORT.md`](bench/results/REPORT.md).
+Alongside it: raw bombardier JSON per scenario, and the full per-sample CPU/memory
+time series as CSV — `<app>_<scenario>_stats.csv` (the app) and
+`<app>_<scenario>_db_stats.csv` (Postgres), plus `<app>_idle_stats.csv`.
 
 ## Regenerating generated code
 
-- sqlc: `cd go-app && sqlc generate`
-- EF Core migration: `dotnet ef migrations add <Name>` (in `dotnet-app/`)
+- sqlc (Go queries): `cd go-app && sqlc generate`
+- .NET migrations are plain SQL in `dotnet-app/Migrations.cs`, applied at startup.
 
 ## Notes on the environment
 

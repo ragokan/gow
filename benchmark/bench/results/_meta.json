@@ -1,11 +1,14 @@
 {
-  "duration": "60s",
+  "duration": "120s",
   "connections": 256,
   "timeout": "10s",
   "seed_rows": 1000,
+  "sample_interval_s": 0.5,
   "app_cpus": "1.5",
   "app_mem": "1g",
   "db_cpus": "1.5",
   "db_mem": "1g",
-  "host_cpus": 4
+  "host_cpus": 4,
+  "dotnet_mode": "Native AOT + raw Npgsql",
+  "go_mode": "compiled + sqlc/pgx"
 }

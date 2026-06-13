@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate bombardier JSON + docker stats CSV into a Markdown benchmark report."""
+"""Aggregate bombardier JSON + continuous resource CSVs into a Markdown report."""
 import csv
 import json
 import os
@@ -7,7 +7,10 @@ import sys
 from datetime import datetime, timezone
 
 APPS = ["go", "dotnet"]
-APP_LABEL = {"go": "Go (chi+sqlc+pgx)", "dotnet": ".NET (Minimal API+EF Core)"}
+APP_LABEL = {
+    "go": "Go (chi + sqlc + pgx)",
+    "dotnet": ".NET 10 AOT (Minimal API + Npgsql)",
+}
 SCENARIOS = [
     ("health", "GET /health (no DB)"),
     ("read_one", "GET /users/{id} (read one)"),
@@ -25,21 +28,33 @@ def load_json(path):
         return None
 
 
+def pct(sorted_vals, p):
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    lo, hi = int(k), min(int(k) + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
 def stats_summary(path):
     if not os.path.exists(path):
         return None
     cpus, mems = [], []
     with open(path) as f:
-        for row in csv.DictReader(f):
-            try:
-                cpus.append(float(row["cpu_perc"]))
-                mems.append(float(row["mem_used_mib"]))
-            except (ValueError, KeyError):
-                pass
+        rows = list(csv.DictReader(f))
+    # drop the first sample (CPU differencer has no baseline yet)
+    for row in rows[1:]:
+        try:
+            cpus.append(float(row["cpu_perc"]))
+            mems.append(float(row.get("mem_mib") or row.get("mem_used_mib")))
+        except (ValueError, KeyError, TypeError):
+            pass
     if not cpus:
         return None
+    cs = sorted(cpus)
     return {
         "cpu_avg": sum(cpus) / len(cpus),
+        "cpu_p95": pct(cs, 95),
         "cpu_max": max(cpus),
         "mem_avg": sum(mems) / len(mems),
         "mem_max": max(mems),
@@ -54,17 +69,18 @@ def metrics(res_dir, app, skey):
     r = data["result"]
     lat = r.get("latency", {})
     rps = r.get("rps", {})
-    pct = lat.get("percentiles", {}) or {}
+    p = lat.get("percentiles", {}) or {}
     total = r["req1xx"] + r["req2xx"] + r["req3xx"] + r["req4xx"] + r["req5xx"] + r["others"]
     return {
         "rps": rps.get("mean", 0),
         "lat_mean_ms": lat.get("mean", 0) / 1000.0,
-        "lat_p99_ms": (pct.get("99") or 0) / 1000.0,
+        "lat_p99_ms": (p.get("99") or 0) / 1000.0,
         "lat_max_ms": lat.get("max", 0) / 1000.0,
         "ok": r["req2xx"],
         "err": r["req4xx"] + r["req5xx"] + r["others"],
         "total": total,
         "stats": stats_summary(os.path.join(res_dir, f"{app}_{skey}_stats.csv")),
+        "db_stats": stats_summary(os.path.join(res_dir, f"{app}_{skey}_db_stats.csv")),
     }
 
 
@@ -92,19 +108,18 @@ def main():
     # Idle usage
     w("## Idle resource usage (container at rest)")
     w("")
-    w("| App | CPU % (avg) | Memory MiB (avg) |")
-    w("|-----|------------:|-----------------:|")
+    w("| App | CPU % (avg) | Memory MiB (avg) | Memory MiB (max) |")
+    w("|-----|------------:|-----------------:|-----------------:|")
     for app in APPS:
         s = stats_summary(os.path.join(res_dir, f"{app}_idle_stats.csv"))
         if s:
-            w(f"| {APP_LABEL[app]} | {fmt(s['cpu_avg'],2)} | {fmt(s['mem_avg'],1)} |")
+            w(f"| {APP_LABEL[app]} | {fmt(s['cpu_avg'],2)} | {fmt(s['mem_avg'],1)} | {fmt(s['mem_max'],1)} |")
     w("")
 
     # Per-scenario throughput / latency
     w("## Throughput & latency (per scenario)")
     w("")
-    w("Higher RPS is better; lower latency is better. Each scenario ran for the "
-      "configured duration at the configured concurrency.")
+    w("Higher RPS is better; lower latency is better.")
     w("")
     for skey, label in SCENARIOS:
         w(f"### {label}")
@@ -130,23 +145,30 @@ def main():
     # Resource usage under load
     w("## Resource usage under load (per scenario)")
     w("")
-    w("CPU % is Docker's metric (100% = 1 vCPU; cap is the configured limit). "
-      "Memory is container RSS.")
+    w("Continuous samples (every sample interval) over the full run. CPU % is "
+      "Docker's metric (100% = 1 vCPU; cap = configured limit). `db` rows show "
+      "the shared Postgres container during that app's run.")
     w("")
     for skey, label in SCENARIOS:
         w(f"### {label}")
         w("")
-        w("| App | CPU % avg | CPU % max | Mem MiB avg | Mem MiB max |")
-        w("|-----|----------:|----------:|------------:|------------:|")
+        w("| Container | CPU % avg | CPU % p95 | CPU % max | Mem MiB avg | Mem MiB max |")
+        w("|-----------|----------:|----------:|----------:|------------:|------------:|")
         for app in APPS:
             mm = metrics(res_dir, app, skey)
-            s = mm["stats"] if mm else None
+            if not mm:
+                continue
+            s = mm["stats"]
             if s:
-                w(f"| {APP_LABEL[app]} | {fmt(s['cpu_avg'],1)} | {fmt(s['cpu_max'],1)} | "
-                  f"{fmt(s['mem_avg'],1)} | {fmt(s['mem_max'],1)} |")
+                w(f"| {APP_LABEL[app]} | {fmt(s['cpu_avg'],1)} | {fmt(s['cpu_p95'],1)} | "
+                  f"{fmt(s['cpu_max'],1)} | {fmt(s['mem_avg'],1)} | {fmt(s['mem_max'],1)} |")
+            d = mm["db_stats"]
+            if d:
+                w(f"| Postgres (during {app}) | {fmt(d['cpu_avg'],1)} | {fmt(d['cpu_p95'],1)} | "
+                  f"{fmt(d['cpu_max'],1)} | {fmt(d['mem_avg'],1)} | {fmt(d['mem_max'],1)} |")
         w("")
 
-    # Memory summary
+    # Memory footprint summary
     w("## Memory footprint summary")
     w("")
     w("| App | Idle (MiB) | Peak under load (MiB) |")
@@ -170,37 +192,37 @@ def main():
     for skey, label in SCENARIOS:
         g = metrics(res_dir, "go", skey)
         d = metrics(res_dir, "dotnet", skey)
-        if not g or not d:
+        if not g or not d or d["rps"] <= 0:
             continue
-        if d["rps"] > 0:
-            ratio = g["rps"] / d["rps"]
-            winner = "Go" if ratio >= 1 else ".NET"
-            factor = ratio if ratio >= 1 else 1 / ratio
-            w(f"| {label} | {fmt(g['rps'])} | {fmt(d['rps'])} | {winner} | {factor:.2f}x |")
+        ratio = g["rps"] / d["rps"]
+        winner = "Go" if ratio >= 1 else ".NET"
+        factor = ratio if ratio >= 1 else 1 / ratio
+        w(f"| {label} | {fmt(g['rps'])} | {fmt(d['rps'])} | {winner} | {factor:.2f}x |")
     w("")
 
     w("## Interpretation")
     w("")
-    w("- **`GET /health` (no DB):** roughly a tie (~60k req/s). Both stacks have "
-      "extremely fast HTTP pipelines; .NET's Kestrel + Minimal API edges it out "
-      "slightly on pure request handling.")
-    w("- **Reads (`read_one`, `list`):** Go leads, most clearly on the point read "
-      "(~1.6x). `sqlc`+`pgx` map rows directly into structs, while EF Core adds "
-      "LINQ translation and a materialization pipeline (even with `AsNoTracking`).")
-    w("- **`POST` (create):** Go leads (~1.4x) — leaner insert + serialization path.")
-    w("- **`PUT` (update):** essentially a tie at low throughput. Every request "
-      "updates the *same* row, so PostgreSQL row-level lock contention dominates "
-      "and both apps become database-bound — this measures the DB under hot-row "
-      "contention, not the framework. Note the apps' CPU stays well below cap here.")
-    w("- **Memory:** Go is dramatically leaner — single-digit/tens of MiB vs the "
-      ".NET runtime's tens-to-hundreds of MiB (idle and under load).")
-    w("- **CPU:** for DB-backed work .NET generally consumes more CPU per request; "
-      "where an app sits below its 1.5 vCPU cap it was waiting on Postgres, not "
-      "compute.")
+    w("Both apps now use a **raw, typed-SQL** data layer (Go: `sqlc`+`pgx`; "
+      ".NET: hand-written `Npgsql` commands), and the .NET app is compiled with "
+      "**Native AOT** (`PublishAot`, source-generated JSON, slim host, server GC, "
+      "`NpgsqlDataSource` with auto-prepare). This is a much closer apples-to-apples "
+      "comparison than ORM-vs-sqlc.")
     w("")
-    w("> Caveat: this compares each ecosystem's *idiomatic* stack — raw typed SQL "
-      "(`sqlc`) vs a full ORM (EF Core). A Dapper-based .NET app would narrow the "
-      "read/insert gaps considerably.")
+    w("- **`GET /health` (no DB):** pure HTTP throughput; closest to a raw "
+      "framework comparison.")
+    w("- **Reads/inserts:** dominated by the driver + serialization path.")
+    w("- **`PUT` (update):** every request updates the *same* row, so PostgreSQL "
+      "row-level lock contention dominates and both apps become database-bound — "
+      "this measures the DB under hot-row contention, not the framework (note the "
+      "apps' CPU sits well below cap while Postgres CPU climbs).")
+    w("- **Memory:** Native AOT removes the JIT and trims the runtime, so the .NET "
+      "footprint is far smaller than a JIT build — compare the idle/peak numbers. "
+      "Go is still the leaner of the two.")
+    w("")
+    w("> Absolute throughput is bounded by the 4-core host shared between the app "
+      "(1.5 vCPU), Postgres (1.5 vCPU), the load generator and the samplers — so "
+      "read the **relative** factors, which both apps face under identical "
+      "conditions, rather than the raw req/s ceiling.")
     w("")
 
     print("\n".join(out))

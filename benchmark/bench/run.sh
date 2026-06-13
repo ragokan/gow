@@ -3,11 +3,12 @@
 #
 # For each app it:
 #   1. (re)seeds an identical dataset into that app's database,
-#   2. records idle CPU/memory of the container,
+#   2. continuously records idle CPU/memory of the container,
 #   3. runs bombardier against each CRUD scenario for DURATION seconds while
-#      sampling the container's CPU/memory under load.
+#      continuously recording CPU/memory of BOTH the app and Postgres.
 #
-# Results land in bench/results/ as JSON (bombardier) + CSV (docker stats).
+# Resource usage is sampled via the Docker API (bench/sampler.py) every INTERVAL
+# seconds, so the full time series is preserved as CSV in bench/results/.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,11 +17,13 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 cd "$BENCH_DIR"
 
 # ---- Tunables -------------------------------------------------------------
-DURATION="${DURATION:-60s}"
+DURATION="${DURATION:-120s}"
 CONNECTIONS="${CONNECTIONS:-256}"
 TIMEOUT="${TIMEOUT:-10s}"
 SEED_ROWS="${SEED_ROWS:-1000}"
-WARMUP="${WARMUP:-5s}"
+WARMUP="${WARMUP:-8s}"
+INTERVAL="${INTERVAL:-0.5}"     # resource sampling interval (seconds)
+IDLE_SECS="${IDLE_SECS:-15}"    # idle recording window (seconds)
 TARGET_ID="${TARGET_ID:-500}"   # an id guaranteed to exist after seeding
 
 POST_BODY='{"name":"Bench User","email":"bench@example.com","age":30}'
@@ -50,15 +53,19 @@ cat > "$RESULTS_DIR/_meta.json" <<META
   "connections": $CONNECTIONS,
   "timeout": "$TIMEOUT",
   "seed_rows": $SEED_ROWS,
+  "sample_interval_s": $INTERVAL,
   "app_cpus": "${APP_CPUS:-1.5}",
   "app_mem": "${APP_MEM:-1g}",
   "db_cpus": "${DB_CPUS:-1.5}",
   "db_mem": "${DB_MEM:-1g}",
-  "host_cpus": $(nproc)
+  "host_cpus": $(nproc),
+  "dotnet_mode": "Native AOT + raw Npgsql",
+  "go_mode": "compiled + sqlc/pgx"
 }
 META
 
 cid() { docker compose ps -q "$1"; }
+PG_CID="$(cid postgres)"
 
 seed_db() {
   local db="$1"
@@ -70,57 +77,27 @@ FROM generate_series(1, ${SEED_ROWS}) g;
 SQL
 }
 
-# Sample docker stats for a container until a stop-file appears.
-sample_stats() {
-  local container="$1" out="$2" stop="$3"
-  echo "cpu_perc,mem_used_mib" > "$out"
-  while [ ! -f "$stop" ]; do
-    line=$(docker stats --no-stream --format '{{.CPUPerc}};{{.MemUsage}}' "$container" 2>/dev/null || true)
-    if [ -n "$line" ]; then
-      cpu=$(echo "$line" | sed 's/%.*//')
-      mem=$(echo "$line" | sed 's/.*;//; s#/.*##' | tr -d ' ')
-      # normalize mem to MiB
-      python3 - "$mem" >>"$out" <<'PY' "$cpu"
-import sys
-mem=sys.argv[1]; cpu=sys.argv[2]
-u=mem.upper()
-val=float(''.join(c for c in u if (c.isdigit() or c=='.')) or 0)
-if 'GIB' in u: val*=1024
-elif 'KIB' in u: val/=1024
-elif 'B' in u and 'MIB' not in u and 'GIB' not in u and 'KIB' not in u: val/=1024*1024
-print(f"{cpu},{val:.1f}")
-PY
-    fi
-  done
+start_sampler() { # container out -> echoes pid
+  # stdout/stderr -> /dev/null so the backgrounded process does not hold the
+  # command-substitution pipe open (the sampler writes its CSV to a file).
+  python3 "$SCRIPT_DIR/sampler.py" "$1" "$2" "$INTERVAL" >/dev/null 2>&1 &
+  echo $!
 }
+stop_sampler() { kill -TERM "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 measure_idle() {
   local container="$1" out="$2"
-  echo "cpu_perc,mem_used_mib" > "$out"
-  for _ in 1 2 3 4 5; do
-    line=$(docker stats --no-stream --format '{{.CPUPerc}};{{.MemUsage}}' "$container" 2>/dev/null || true)
-    cpu=$(echo "$line" | sed 's/%.*//')
-    mem=$(echo "$line" | sed 's/.*;//; s#/.*##' | tr -d ' ')
-    python3 - "$mem" >>"$out" <<'PY' "$cpu"
-import sys
-mem=sys.argv[1]; cpu=sys.argv[2]
-u=mem.upper()
-val=float(''.join(c for c in u if (c.isdigit() or c=='.')) or 0)
-if 'GIB' in u: val*=1024
-elif 'KIB' in u: val/=1024
-print(f"{cpu},{val:.1f}")
-PY
-  done
+  local p; p=$(start_sampler "$container" "$out")
+  sleep "$IDLE_SECS"
+  stop_sampler "$p"
 }
 
 run_scenario() {
   local app="$1" port="$2" container="$3" skey="$4" method="$5" path="$6" body="$7"
   local url="http://localhost:${port}${path}"
   local json="$RESULTS_DIR/${app}_${skey}.json"
-  local stats="$RESULTS_DIR/${app}_${skey}_stats.csv"
-  local stop="$RESULTS_DIR/.${app}_${skey}.stop"
 
-  echo "  -> [$app] $skey ($method $path)"
+  echo "  -> [$app] $skey ($method $path)  for $DURATION @ $CONNECTIONS conns"
 
   local bargs=(-c "$CONNECTIONS" -d "$DURATION" -t "$TIMEOUT" -l -m "$method" -o json -p result)
   if [ -n "$body" ]; then
@@ -131,20 +108,19 @@ run_scenario() {
   bombardier -c "$CONNECTIONS" -d "$WARMUP" -t "$TIMEOUT" -m "$method" \
     ${body:+-H "Content-Type: application/json" -b "$body"} -q "$url" >/dev/null 2>&1 || true
 
-  rm -f "$stop"
-  sample_stats "$container" "$stats" "$stop" &
-  local sampler=$!
+  local sp dp
+  sp=$(start_sampler "$container" "$RESULTS_DIR/${app}_${skey}_stats.csv")
+  dp=$(start_sampler "$PG_CID" "$RESULTS_DIR/${app}_${skey}_db_stats.csv")
 
   bombardier "${bargs[@]}" "$url" > "$json" 2>/dev/null || true
 
-  touch "$stop"
-  wait "$sampler" 2>/dev/null || true
-  rm -f "$stop"
+  stop_sampler "$sp"
+  stop_sampler "$dp"
 }
 
 echo "=============================================="
 echo " Benchmark config"
-echo "   duration=$DURATION connections=$CONNECTIONS seed_rows=$SEED_ROWS"
+echo "   duration=$DURATION connections=$CONNECTIONS seed_rows=$SEED_ROWS sample=${INTERVAL}s"
 echo "   app limits: ${APP_CPUS:-1.5} vCPU / ${APP_MEM:-1g}"
 echo "=============================================="
 
@@ -157,13 +133,12 @@ for entry in "${APPS[@]}"; do
   echo "  seeding $SEED_ROWS rows into $db ..."
   seed_db "$db"
 
-  echo "  measuring idle resource usage ..."
-  sleep 3
+  echo "  recording idle resource usage (${IDLE_SECS}s) ..."
+  sleep 2
   measure_idle "$container" "$RESULTS_DIR/${app}_idle_stats.csv"
 
   for s in "${SCENARIOS[@]}"; do
     IFS='|' read -r skey method path body <<< "$s"
-    # reseed before mutating scenarios so both apps start from the same state
     if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
       seed_db "$db"
     fi
