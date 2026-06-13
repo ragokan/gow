@@ -1,0 +1,9 @@
+# Compiled Go binary (rebuilt by run.sh)
+go-app/benchapp
+
+# .NET build artifacts
+dotnet-app/obj/
+dotnet-app/bin/
+
+# transient stop-files from the sampler
+bench/results/.*.stop

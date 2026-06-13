@@ -1,0 +1,11 @@
+{
+  "duration": "60s",
+  "connections": 256,
+  "timeout": "10s",
+  "seed_rows": 1000,
+  "app_cpus": "1.5",
+  "app_mem": "1g",
+  "db_cpus": "1.5",
+  "db_mem": "1g",
+  "host_cpus": 4
+}

@@ -1,0 +1,63 @@
+# Go vs .NET CRUD benchmark.
+#
+# Equal resources: each application container is limited to the SAME CPU and
+# memory (APP_CPUS / APP_MEM). Both talk to one shared Postgres instance, each
+# using its own database (bench_go / bench_dotnet). Apps are load-tested
+# sequentially so only one is under load at a time.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    cpus: ${DB_CPUS:-1.5}
+    mem_limit: ${DB_MEM:-1g}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  go-app:
+    build:
+      context: .
+      dockerfile: go-app/Dockerfile
+    environment:
+      DATABASE_URL: postgres://bench:bench@postgres:5432/bench_go?sslmode=disable
+      DB_MAX_CONNS: "30"
+      DB_MIN_CONNS: "10"
+      PORT: "8080"
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: ${APP_CPUS:-1.5}
+    mem_limit: ${APP_MEM:-1g}
+
+  dotnet-app:
+    build:
+      context: .
+      dockerfile: dotnet-app/Dockerfile
+    environment:
+      DATABASE_URL: "Host=postgres;Database=bench_dotnet;Username=bench;Password=bench"
+      DB_MAX_CONNS: "30"
+      DB_MIN_CONNS: "10"
+      ASPNETCORE_URLS: "http://+:8080"
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: ${APP_CPUS:-1.5}
+    mem_limit: ${APP_MEM:-1g}

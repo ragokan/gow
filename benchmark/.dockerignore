@@ -1,0 +1,5 @@
+**/obj
+**/bin
+go-app/db/sqlc/*.go.tmp
+**/*.md
+bench/results
