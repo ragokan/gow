@@ -1,0 +1,6 @@
+# Built binaries / publish output
+/bin/
+
+# .NET intermediate build output
+dotnet-api/bin/
+dotnet-api/obj/
